@@ -88,6 +88,7 @@ The server only listens on your own computer (127.0.0.1), because it can store y
 | Binance | Crypto | **Real-time** over WebSocket (USD pairs map to USDT) |
 | Coinbase Exchange | Crypto (USD/EUR/GBP) | Public candles |
 | Kraken | Crypto | Public candles, ~720 bars per interval |
+| OKX | Crypto (spot, perpetual swaps and dated futures) | Public candles, 300 bars per interval, all timeframes; optional API key raises the rate limit (⚙ › Data sources) |
 | Upstox (public history) | India (NSE/BSE stocks, NIFTY/SENSEX indices) | Broker-grade candles, including today's intraday, with no login |
 | CoinGecko | Thousands of coins | Works keyless; an optional free Demo key raises the limit. Intraday wicks are approximate |
 
@@ -182,9 +183,10 @@ A theme picker with live thumbnails appears the first time someone opens LinkCha
 Click **🔍 Screener** in the header. Esc goes back to the chart.
 
 - **Markets and data sources:**
-  - **India:** NSE's official index lists (NIFTY 50, 100, 200, 500, Midcap 150, Smallcap 250, Microcap 250, Total Market 750). Pick one under *Universe*. Industry is used as the sector. There's no market cap, P/E or dividend data, so India sorts by *Value traded* and hides those filters.
   - **United States:** every NASDAQ, NYSE and NYSE American stock from Nasdaq's public screener, with price, change, volume, market cap and sector. The largest N by market cap (250–1,500) get the full set of figures.
-  - **UK, Germany, Japan, Hong Kong, Canada, Australia:** these still use Yahoo's screener, which currently refuses sessions from apps like this. The screener shows a message when it's unavailable.
+  - **Korea:** every KOSPI and KOSDAQ stock (Korea's listed funds are skipped) from Naver Finance's market-value list, by market cap. Price, change, volume and market cap are Naver's; the 52-week range, moving averages and 1W–1Y returns come from a year of Yahoo daily prices. There is no sector or P/E data, so those filters are hidden.
+  - **Crypto (OKX):** every live OKX instrument — spot pairs (USDT, EUR, BTC and ETH quotes; USDT pairs are shown as `-USD`), **perpetual swaps** (`BTC-USDT-SWAP`) and **dated futures** (`BTC-USD-261127`) — sorted by 24-hour value traded. Tick the checkboxes to narrow it to spot quotes, perpetuals, or futures. The figures are 24-hour ones from OKX's tickers endpoint, so there is no market cap, P/E or 52-week data; those filters, presets and columns are hidden or greyed out. Derivative rows open their own chart (OKX candles) and work in watchlists.
+  - **How the figures are made:** relative volume, 52-week range, moving-average distance and 1W–1Y returns are calculated from a year of daily prices for each stock. The first scan takes about 5–20 seconds, then results are cached for a few minutes.
   - **How the figures are made:** relative volume, 52-week range, moving-average distance and 1W–1Y returns are calculated from a year of daily prices for each stock. The first scan takes about 5–20 seconds, then results are cached for a few minutes.
 - **Ready-made screens:** top gainers, top losers, most active, unusual volume, near 52-week high, near 52-week low, large caps, low P/E, high dividend, and above the 50- and 200-day moving averages. Screens that need data a market doesn't have are greyed out.
 - **Filters:**
@@ -232,7 +234,7 @@ Everything you set up is saved automatically to **`data/userdata.json`** on your
 | `src/chart.js` | Price chart, volume, indicator overlays and panes, legend, coordinate helpers |
 | `src/drawings.js` | Drawing tools (a Lightweight Charts series primitive) |
 | `src/indicators.js` | Indicator maths and registry |
-| `screener.mjs` · `screener-sources.mjs` · `src/screener.js` | Screener: market routing, NSE/Nasdaq sources with Yahoo price history, and the UI |
+| `screener.mjs` · `screener-sources.mjs` · `src/screener.js` | Screener: market routing, Nasdaq (US), Naver (Korea) and OKX (crypto) sources with Yahoo price history, and the UI |
 | `src/themes.js` | Theme definitions (UI variables + chart palette) and the theme picker |
 | `src/watchlists.js` · `src/alerts.js` · `src/trading.js` · `src/replay.js` · `src/details.js` · `src/settings.js` | Panels |
 

@@ -1,7 +1,7 @@
 // Paper trading with two separate virtual accounts: "live" (current prices) and "replay"
 // (prices from bar replay). Market/limit/stop orders, optional stop-loss & take-profit (OCO),
 // long and short positions, realized/unrealized P&L. Everything stays in this browser.
-import { store, uid, esc, short, fmtPx, fmtMoney, signed, cls, precisionFor, bus, toast, modal, fmtTime, askConfirm } from "./util.js";
+import { store, uid, esc, short, fmtPx, fmtMoney, signed, cls, precisionFor, bus, toast, modal, fmtTime, askConfirm, localeFor } from "./util.js";
 
 const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const START = { INR: 1_000_000, USD: 100_000, EUR: 100_000, GBP: 100_000, JPY: 10_000_000 };
@@ -187,7 +187,7 @@ export class Trading {
           const last = this.getPrice(s), d = precisionFor(p.avg, s);
           const pnl = last != null ? (last - p.avg) * p.qty : null, pct = last != null ? ((last - p.avg) / p.avg) * 100 * Math.sign(p.qty) : null;
           return `<tr><td><b data-go="${esc(s)}">${esc(short(s))}</b></td><td class="${p.qty > 0 ? "up" : "down"}">${p.qty > 0 ? "Long" : "Short"}</td><td>${Math.abs(p.qty)}</td>
-            <td>${fmtPx(p.avg, d)}</td><td>${fmtPx(last, d)}</td><td class="${cls(pnl)}">${pnl == null ? "—" : fmtMoney(pnl, p.ccy)}</td><td class="${cls(pct)}">${pct == null ? "—" : signed(pct) + "%"}</td>
+            <td>${fmtPx(p.avg, d, localeFor(p.ccy))}</td><td>${fmtPx(last, d, localeFor(p.ccy))}</td><td class="${cls(pnl)}">${pnl == null ? "—" : fmtMoney(pnl, p.ccy)}</td><td class="${cls(pct)}">${pct == null ? "—" : signed(pct) + "%"}</td>
             <td><button class="small" data-close="${esc(s)}">Close</button></td></tr>`;
         }).join("")}</table>` : `<div class="empty-note">No open positions in the ${mode} account. Use Buy/Sell on the chart or the ticket.</div>`;
     } else if (this.tab === "orders") {

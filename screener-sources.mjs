@@ -1,5 +1,4 @@
-// Screener data that doesn't depend on Yahoo's (now session-locked) screener endpoint:
-// - India: NSE's official index constituent lists (NIFTY 50 … Total Market)
+// Screener data that doesn't depend on Yahoo's (session-locked) screener endpoint:
 // - United States: Nasdaq's public stock screener (all NASDAQ / NYSE / NYSE American stocks)
 // Each stock is then enriched from a year of Yahoo daily candles (no login needed), which gives
 // price, change, volume, relative volume, 52-week range, moving-average distance and returns.
@@ -18,7 +17,7 @@ async function cached(key, ttlMs, fn) {
 }
 
 /** Runs fn over items with at most `limit` in flight; failed items resolve to null. */
-async function mapLimit(items, limit, fn) {
+export async function mapLimit(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -28,24 +27,6 @@ async function mapLimit(items, limit, fn) {
     }
   }));
   return out;
-}
-
-function parseCsv(text) {
-  const rows = [];
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const cells = [];
-    let cur = "", quoted = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') { if (quoted && line[i + 1] === '"') { cur += '"'; i++; } else quoted = !quoted; }
-      else if (ch === "," && !quoted) { cells.push(cur.trim()); cur = ""; }
-      else cur += ch;
-    }
-    cells.push(cur.trim());
-    rows.push(cells);
-  }
-  return rows;
 }
 
 // ---------------- per-stock metrics from daily candles ----------------
@@ -86,43 +67,6 @@ export function stockMetrics(symbol) {
       marketState: meta.marketOpen ? "REGULAR" : "CLOSED",
     };
   });
-}
-
-// ---------------- India: NSE index constituents ----------------
-
-export const INDIA_UNIVERSES = {
-  nifty50: ["NIFTY 50", "ind_nifty50list"],
-  nifty100: ["NIFTY 100", "ind_nifty100list"],
-  nifty200: ["NIFTY 200", "ind_nifty200list"],
-  nifty500: ["NIFTY 500", "ind_nifty500list"],
-  midcap150: ["NIFTY Midcap 150", "ind_niftymidcap150list"],
-  smallcap250: ["NIFTY Smallcap 250", "ind_niftysmallcap250list"],
-  microcap250: ["NIFTY Microcap 250", "ind_niftymicrocap250_list"],
-  total: ["NIFTY Total Market (750)", "ind_niftytotalmarket_list"],
-};
-
-async function indiaList(universe) {
-  const [, file] = INDIA_UNIVERSES[universe] || INDIA_UNIVERSES.nifty500;
-  return cached(`nse:${file}`, 12 * 3600_000, async () => {
-    const res = await fetch(`https://nsearchives.nseindia.com/content/indices/${file}.csv`, { headers: { "User-Agent": UA } });
-    if (!res.ok) throw Object.assign(new Error(`NSE index list unavailable (HTTP ${res.status})`), { status: 502 });
-    const [head, ...rows] = parseCsv(await res.text());
-    const col = (name) => head.findIndex((h) => h.toLowerCase().startsWith(name));
-    const iName = col("company"), iInd = col("industry"), iSym = col("symbol");
-    return rows.filter((r) => r[iSym]).map((r) => ({ symbol: `${r[iSym]}.NS`, name: r[iName], sector: r[iInd] || null, exchange: "NSE" }));
-  });
-}
-
-export async function screenIndia({ universe = "nifty500" }) {
-  const list = await indiaList(universe);
-  const metrics = await mapLimit(list, 16, (s) => stockMetrics(s.symbol));
-  const rows = list.map((s, i) => (metrics[i] ? { ...metrics[i], ...s, mcap: null, pe: null, divYield: null } : null)).filter(Boolean);
-  return {
-    total: list.length, returned: rows.length, currency: "INR", rows,
-    universe: INDIA_UNIVERSES[universe]?.[0] || "NIFTY 500",
-    sectors: [...new Set(rows.map((r) => r.sector).filter(Boolean))].sort(),
-    note: rows.length < list.length ? `${list.length - rows.length} stocks had no price data` : null,
-  };
 }
 
 // ---------------- United States: Nasdaq screener ----------------

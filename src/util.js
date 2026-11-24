@@ -86,11 +86,15 @@ export const FRIENDLY = {
 };
 export const short = (s) => FRIENDLY[s] || s.replace(/\.(NS|BO)$/, "").replace(/=X$/, "").replace(/-USD$/, "USD");
 
-const SYMBOL = { INR: "₹", USD: "$", EUR: "€", GBP: "£", JPY: "¥", GBp: "p", HKD: "HK$", CNY: "¥", USDT: "₮" };
+const SYMBOL = { INR: "₹", USD: "$", EUR: "€", GBP: "£", JPY: "¥", GBp: "p", HKD: "HK$", CNY: "¥", KRW: "₩", USDT: "₮" };
 export const currencySymbol = (c) => SYMBOL[c] ?? (c ? c + " " : "");
+
+/** Number grouping for a currency: Korean/Japanese won amounts read better with plain thousands. */
+export const localeFor = (currency) => (currency === "KRW" || currency === "JPY" ? "en-US" : "en-IN");
 
 /** Decimal places that suit a price's magnitude (forex and small coins need more). */
 export function precisionFor(price, symbol = "") {
+  if (/\.[KQ][SP]$/.test(symbol)) return 0; // KRX prices are whole won
   if (/=X$/.test(symbol)) return price > 20 ? 3 : 5;
   const p = Math.abs(price || 0);
   if (p >= 1) return 2;
@@ -98,10 +102,10 @@ export function precisionFor(price, symbol = "") {
   return 6;
 }
 
-export function fmtPx(v, digits) {
+export function fmtPx(v, digits, locale = "en-IN") {
   if (v == null || Number.isNaN(v)) return "—";
   const d = digits ?? precisionFor(v);
-  return v.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
+  return v.toLocaleString(locale, { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
 export function fmtVol(v, currency) {
@@ -123,7 +127,7 @@ export function fmtMoney(v, currency) {
   return sign + currencySymbol(currency) + Math.abs(v).toLocaleString(currency === "INR" ? "en-IN" : "en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export const signed = (v, digits = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(digits);
+export const signed = (v, digits = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 export const cls = (v) => (v > 0 ? "up" : v < 0 ? "down" : "muted");
 
 export function fmtTime(unix, tz) {

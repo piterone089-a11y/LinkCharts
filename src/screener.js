@@ -1,5 +1,5 @@
 // Stock screener view: market/exchange, presets, filter pills, sortable table, lazy performance columns.
-import { api, esc, store, bus, toast, askText, fmtPx, fmtVol, signed, cls, currencySymbol, short } from "./util.js";
+import { api, esc, store, bus, toast, askText, fmtPx, fmtVol, signed, cls, currencySymbol, short, precisionFor, localeFor } from "./util.js";
 
 // ---------------- number helpers ----------------
 
@@ -47,9 +47,9 @@ const FILTERS = [
 ];
 
 const COLUMNS = [
-  { id: "price", label: "Price", get: (r) => r.price, fmt: (v, r) => fmtPx(v, v < 1 ? 4 : 2) },
+  { id: "price", label: "Price", get: (r) => r.price, fmt: (v, r) => fmtPx(v, precisionFor(v, r?.symbol), localeFor(r?.currency)) },
   { id: "changePct", label: "Chg %", get: (r) => r.changePct, fmt: pct, color: true },
-  { id: "change", label: "Chg", get: (r) => r.change, fmt: (v) => (v == null ? "—" : signed(v)), color: true },
+  { id: "change", label: "Chg", get: (r) => r.change, fmt: (v, r) => (v == null ? "—" : signed(v, precisionFor(v, r?.symbol))), color: true },
   { id: "volume", label: "Volume", get: (r) => r.volume, fmt: (v, r) => fmtVol(v, r.currency) },
   { id: "relVol", label: "Rel vol", get: (r) => r.relVol, fmt: (v) => (v == null ? "—" : v.toFixed(2) + "×"), hot: (v) => v >= 2 },
   { id: "mcap", label: "Mkt cap", get: (r) => r.mcap, fmt: (v, r) => fmtMcap(v, r.currency) },
@@ -58,7 +58,7 @@ const COLUMNS = [
   { id: "eps", label: "EPS (TTM)", get: (r) => r.eps, fmt: (v) => (v == null ? "—" : v.toFixed(2)), off: true },
   { id: "pb", label: "P/B", get: (r) => r.pb, fmt: (v) => (v == null ? "—" : v.toFixed(2)), off: true },
   { id: "divYield", label: "Div %", get: (r) => r.divYield, fmt: (v) => (v == null ? "—" : v.toFixed(2) + "%") },
-  { id: "high52", label: "52W high", get: (r) => r.high52, fmt: (v) => fmtPx(v, v < 1 ? 4 : 2), off: true },
+  { id: "high52", label: "52W high", get: (r) => r.high52, fmt: (v, r) => fmtPx(v, precisionFor(v, r?.symbol), localeFor(r?.currency)), off: true },
   { id: "fromHigh52", label: "From 52W high", get: (r) => r.fromHigh52, fmt: pct, color: true },
   { id: "chg52w", label: "52W chg", get: (r) => r.chg52w, fmt: pct, color: true },
   { id: "vs50", label: "vs 50 MA", get: (r) => r.vs50, fmt: pct, color: true, off: true },
@@ -99,7 +99,7 @@ export class Screener {
     this.onAddToWatchlist = onAddToWatchlist;
     const saved = store.get("screener", {});
     this.state = {
-      market: saved.market || "india",
+      market: saved.market || "us",
       exchanges: saved.exchanges || [],
       filters: saved.filters || {},
       sectors: saved.sectors || [],
@@ -107,8 +107,7 @@ export class Screener {
       columns: saved.columns || COLUMNS.filter((c) => !c.off).map((c) => c.id),
       preset: saved.preset || "all",
       limit: saved.limit || 500,
-      universe: saved.universe || "nifty500",
-      dedupe: saved.dedupe ?? true,
+      universe: saved.universe || "",
       page: 0,
     };
     this.meta = null;
@@ -119,8 +118,8 @@ export class Screener {
   }
 
   save() {
-    const { market, exchanges, filters, sectors, sort, columns, preset, limit, dedupe, universe } = this.state;
-    store.set("screener", { market, exchanges, filters, sectors, sort, columns, preset, limit, dedupe, universe });
+    const { market, exchanges, filters, sectors, sort, columns, preset, limit, universe } = this.state;
+    store.set("screener", { market, exchanges, filters, sectors, sort, columns, preset, limit, universe });
   }
 
   async open() {
@@ -128,13 +127,18 @@ export class Screener {
     if (!this.meta) {
       try { this.meta = await api("/api/screener/meta"); } catch (e) { this.el.innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
     }
+    // A market saved before it was removed (or a bad value) falls back to the United States.
+    if (!this.meta.markets[this.state.market]) {
+      this.state.market = "us"; this.state.exchanges = []; this.state.sectors = []; this.state.universe = "";
+      this.save();
+    }
     this.render();
     if (!this.data) this.run();
   }
 
   close() { this.el.hidden = true; }
 
-  get market() { return this.meta.markets[this.state.market]; }
+  get market() { return this.meta.markets[this.state.market] || this.meta.markets.us; }
 
   /** True if the loaded data has this field for at least one stock (e.g. India has no market cap or P/E). */
   available(field) {
@@ -143,6 +147,13 @@ export class Screener {
     return this.data.rows.some((r) => r[field] != null);
   }
   get currency() { return this.market.currency; }
+
+  /** Sectors only exist for the stock markets; crypto returns an empty list, so the filter is hidden there. */
+  sectors() {
+    const fromData = this.data?.sectors;
+    return Array.isArray(fromData) ? fromData : (this.meta.sectors || []);
+  }
+  hasSectors() { return this.sectors().length > 0; }
 
   // ---------------- data ----------------
 
@@ -179,11 +190,6 @@ export class Screener {
     if (!this.data) return [];
     let rows = this.data.rows.map((r) => ({ ...r, perf: r.perf ?? this.perf.get(r.symbol) }));
     if (this.state.sectors.length) rows = rows.filter((r) => !r.sector || this.state.sectors.includes(r.sector));
-    if (this.state.dedupe) {
-      // A company listed on two exchanges (e.g. RELIANCE.NS and RELIANCE.BO): keep the primary listing.
-      const primary = new Set(rows.filter((r) => /\.NS$/.test(r.symbol)).map((r) => r.symbol.replace(/\.NS$/, "")));
-      rows = rows.filter((r) => !(/\.BO$/.test(r.symbol) && primary.has(r.symbol.replace(/\.BO$/, ""))));
-    }
     for (const f of FILTERS) {
       const v = this.state.filters[f.id];
       if (!v || f.kind !== "range") continue;
@@ -231,10 +237,9 @@ export class Screener {
         <select id="sc-market" title="Market">${Object.entries(this.meta.markets).map(([k, v]) => `<option value="${k}" ${k === this.state.market ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select>
         ${m.universes ? `<label class="small">Universe <select id="sc-universe">${Object.entries(m.universes).map(([k, l]) => `<option value="${k}" ${k === this.state.universe ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`
           : `<div class="sc-ex">${exchanges.map(([code, name]) => `<label><input type="checkbox" data-ex="${code}" ${!this.state.exchanges.length || this.state.exchanges.includes(code) ? "checked" : ""}/> ${esc(name)}</label>`).join("")}</div>`}
-        ${Object.keys(m.exchanges).length > 1 && this.state.market === "india" ? `<label class="small"><input type="checkbox" id="sc-dedupe" ${this.state.dedupe ? "checked" : ""}/> Hide BSE copies of NSE stocks</label>` : ""}
         <span class="spacer"></span>
         <span class="muted small" title="Where the data comes from">${esc(m.source || "")}</span>
-        <label class="muted small" ${m.universes ? "hidden" : ""}>Scan top <select id="sc-limit">${[250, 500, 1000, 1500].map((n) => `<option ${n === this.state.limit ? "selected" : ""}>${n}</option>`).join("")}</select> by market cap</label>
+        <label class="muted small" ${m.universes ? "hidden" : ""}>Scan top <select id="sc-limit">${[250, 500, 1000, 1500].map((n) => `<option ${n === this.state.limit ? "selected" : ""}>${n}</option>`).join("")}</select> by ${this.state.market === "crypto" ? "24h value" : "market cap"}</label>
         <button id="sc-refresh" title="Refresh data">⟳ Refresh</button>
         <button class="icon" id="sc-close" title="Back to chart (Esc)">✕</button>
       </div>
@@ -254,11 +259,10 @@ export class Screener {
     $("#sc-market").onchange = (e) => {
       this.state.market = e.target.value;
       this.state.exchanges = [];
+      this.state.sectors = [];
       this.save(); this.render(); this.run();
     };
     $("#sc-limit").onchange = (e) => { this.state.limit = +e.target.value; this.save(); this.run(); };
-    const dd = $("#sc-dedupe");
-    if (dd) dd.onchange = () => { this.state.dedupe = dd.checked; this.save(); this.renderTable(); };
     const uni = $("#sc-universe");
     if (uni) uni.onchange = () => { this.state.universe = uni.value; this.save(); this.run(); };
     const exBox = this.el.querySelector(".sc-ex");
@@ -293,7 +297,7 @@ export class Screener {
       if (v.max != null) return `≤ ${show(v.max)}`;
       return "";
     };
-    box.innerHTML = FILTERS.filter((f) => f.kind !== "range" || this.available(f.field)).map((f) => {
+    box.innerHTML = FILTERS.filter((f) => (f.kind === "sector" ? this.hasSectors() : true)).filter((f) => f.kind !== "range" || this.available(f.field)).map((f) => {
       const val = valueText(f);
       return `<div class="pill-wrap"><button class="fpill ${val ? "set" : ""}" data-pill="${f.id}">${esc(f.label)}${val ? `: <b>${esc(val)}</b>` : " ▾"}</button>
         ${this.openPill === f.id ? this.pillEditor(f) : ""}</div>`;
@@ -309,7 +313,7 @@ export class Screener {
 
   pillEditor(f) {
     if (f.kind === "sector") {
-      return `<div class="pill-pop"><div class="sector-list">${(this.data?.sectors || this.meta.sectors).map((s) => `<label><input type="checkbox" data-sector="${esc(s)}" ${this.state.sectors.includes(s) ? "checked" : ""}/> ${esc(s)}</label>`).join("")}</div>
+      return `<div class="pill-pop"><div class="sector-list">${this.sectors().map((s) => `<label><input type="checkbox" data-sector="${esc(s)}" ${this.state.sectors.includes(s) ? "checked" : ""}/> ${esc(s)}</label>`).join("")}</div>
         <div class="row-end"><button data-pop="clear">Clear</button><button class="primary" data-pop="apply">Apply</button></div></div>`;
     }
     const v = this.state.filters[f.id] || {};
@@ -338,8 +342,8 @@ export class Screener {
       this.openPill = null;
       this.save();
       this.render();
-      // Filters Yahoo can apply narrow the universe → refetch; the rest are instant client-side.
-      if (this.state.market !== "india" && (f.server || f.kind === "sector")) this.run();
+      // Filters the source can apply narrow the universe → refetch; the rest are instant client-side.
+      if (f.server || f.kind === "sector") this.run();
       else this.renderTable();
     };
     pop.onclick = (e) => { const a = e.target.dataset.pop; if (a === "apply") apply(false); if (a === "clear") apply(true); };

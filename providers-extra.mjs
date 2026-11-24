@@ -2,6 +2,7 @@
 // candles(symbol, interval, cfg) → [{ time (unix s, UTC), open, high, low, close, volume }] sorted ascending.
 import zlib from "node:zlib";
 import { promisify } from "node:util";
+import { createHmac } from "node:crypto";
 import { getJson, getText, ProviderError } from "./providers.mjs";
 
 const gunzip = promisify(zlib.gunzip);
@@ -502,4 +503,73 @@ export const tradier = {
   },
 };
 
-export const EXTRA_PROVIDERS = { coinbase, kraken, upstox, coingecko, kite, alphavantage, tiingo, fmp, eodhd, marketstack, alpaca, tradier };
+// ---------------- OKX ----------------
+// OKX's 1D/1W/1M bars start at 00:00 UTC+8; the "utc" variants keep every interval on UTC like the rest of the app.
+const OKX_BAR = { "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "60m": "1H", "1d": "1Dutc", "1wk": "1Wutc", "1mo": "1Mutc" };
+const OKX_QUOTES = ["USD", "USDT", "EUR", "GBP", "BTC", "ETH"]; // the quotes marketOf() treats as crypto
+
+/** "BTC-USD" → "BTC-USDT" (OKX has no BTC-USD spot pair; USDT is the ~1:1 stand-in).
+ *  "BTC-USDT-SWAP" and "BTC-USD-261127" are perpetual swaps and dated futures, used as-is. */
+function okxInst(symbol) {
+  const d = /^([A-Z0-9]{2,12})-([A-Z]{2,5})-(SWAP|\d{6})$/.exec(symbol);
+  if (d) return `${d[1]}-${d[2]}-${d[3]}`;
+  const m = /^([A-Z0-9]{2,12})-([A-Z]{3,4})$/.exec(symbol);
+  if (!m || !OKX_QUOTES.includes(m[2])) return null;
+  return `${m[1]}-${m[2] === "USD" ? "USDT" : m[2]}`;
+}
+
+/** Unwraps OKX's { code, msg, data } envelope; auth errors are marked 401 so the caller can retry unsigned. */
+function okxData(body) {
+  const code = String(body?.code ?? "0");
+  if (code === "0") return body.data || [];
+  const auth = ["50111", "50112", "50113", "50114"].includes(code); // bad key / signature / passphrase / timestamp
+  throw new ProviderError(body?.msg || `OKX error ${code}`, auth ? 401 : 400);
+}
+
+const okxAuthErr = (e) => e?.status === 401;
+
+/**
+ * GET against OKX. With all three credentials saved the request is signed (OKX rate-limits
+ * identified accounts more generously); if OKX rejects the signature the same request is made
+ * unsigned, because public market data never needs a key.
+ */
+async function okxGet(pathAndQuery, cfg = {}) {
+  const signed = cfg.apiKey && cfg.apiSecret && cfg.passphrase;
+  const url = `https://www.okx.com${pathAndQuery}`;
+  if (!signed) return okxData(await getJson(url));
+  const timestamp = new Date().toISOString();
+  const sign = createHmac("sha256", cfg.apiSecret).update(`${timestamp}GET${pathAndQuery}`).digest("base64");
+  try {
+    return okxData(await getJson(url, {
+      headers: {
+        "OK-ACCESS-KEY": cfg.apiKey, "OK-ACCESS-SIGN": sign,
+        "OK-ACCESS-TIMESTAMP": timestamp, "OK-ACCESS-PASSPHRASE": cfg.passphrase,
+      },
+    }));
+  } catch (err) {
+    if (!okxAuthErr(err)) throw err;
+    return okxData(await getJson(url)); // keys not usable for this endpoint: public data still works
+  }
+}
+
+export const okx = {
+  id: "okx", name: "OKX", markets: ["crypto"], live: false, alwaysOn: true, // only source for perps/futures, even without saved keys
+  note: "Free, no key. Spot crypto (BTC-USDT etc.), perpetual swaps (BTC-USDT-SWAP) and dated futures (BTC-USD-261127); USD spot pairs use USDT. API keys are optional — when all three are saved, requests are signed so OKX counts them against your account's rate limit instead of the shared one.",
+  fields: [
+    { key: "apiKey", label: "API key", placeholder: "OKX API key", optional: true },
+    { key: "apiSecret", label: "Secret key", placeholder: "OKX secret key", secret: true, optional: true },
+    { key: "passphrase", label: "Passphrase", placeholder: "The passphrase you set for this API key", secret: true, optional: true },
+  ],
+  testSymbol: "BTC-USD",
+  supports: (symbol, interval) => !!okxInst(symbol) && !!OKX_BAR[interval],
+  async candles(symbol, interval, cfg = {}) {
+    const instId = okxInst(symbol);
+    if (!instId) throw new ProviderError("Not an OKX spot pair", 400);
+    const rows = await okxGet(`/api/v5/market/candles?instId=${encodeURIComponent(instId)}&bar=${OKX_BAR[interval]}&limit=300`, cfg);
+    if (!rows.length) throw new ProviderError(`OKX has no candles for ${instId}`, 404);
+    // [ts(ms), open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm]
+    return sortAsc(rows.map((r) => ({ time: Math.floor(+r[0] / 1000), open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[5] })));
+  },
+};
+
+export const EXTRA_PROVIDERS = { coinbase, kraken, okx, upstox, coingecko, kite, alphavantage, tiingo, fmp, eodhd, marketstack, alpaca, tradier };

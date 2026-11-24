@@ -1,6 +1,6 @@
 // Chart view: main price chart + volume + indicator overlays + stacked indicator panes.
 import { INDICATORS, shortLabel } from "./indicators.js";
-import { $, esc, fmtPx, fmtVol, signed, cls, precisionFor, short, bus } from "./util.js";
+import { $, esc, fmtPx, fmtVol, signed, cls, precisionFor, short, bus, localeFor } from "./util.js";
 
 const LC = window.LightweightCharts;
 
@@ -291,14 +291,14 @@ export class ChartView {
     let i = c.length - 1;
     if (this.hover != null) { const j = this.indexOfTime(this.hover); if (j >= 0) i = j; }
     const bar = c[i], prev = i > 0 ? c[i - 1].close : bar.open;
-    const ch = bar.close - prev, chp = (ch / prev) * 100, d = precisionFor(bar.close, this.meta.symbol);
+    const ch = bar.close - prev, chp = (ch / prev) * 100, d = precisionFor(bar.close, this.meta.symbol), loc = localeFor(this.meta.currency);
     const studies = this.studies.filter((s) => ["overlay", "volume"].includes(INDICATORS[s.type]?.kind))
       .map((s) => `<span class="leg-study" data-study="${s.id}">${esc(shortLabel(s.type, s.params))}<b data-edit="${s.id}" title="Settings">⚙</b><b data-remove="${s.id}" title="Remove">✕</b></span>`).join("");
     this.legendEl.innerHTML = `
       <div class="l1"><b>${esc(short(this.meta.symbol))}</b><span class="muted">${esc(this.meta.name || "")} · ${esc(this.meta.exchange || "")}</span></div>
       <div class="l2">
-        <span>O <i class="${cls(ch)}">${fmtPx(bar.open, d)}</i></span><span>H <i class="${cls(ch)}">${fmtPx(bar.high, d)}</i></span>
-        <span>L <i class="${cls(ch)}">${fmtPx(bar.low, d)}</i></span><span>C <i class="${cls(ch)}">${fmtPx(bar.close, d)}</i></span>
+        <span>O <i class="${cls(ch)}">${fmtPx(bar.open, d, loc)}</i></span><span>H <i class="${cls(ch)}">${fmtPx(bar.high, d, loc)}</i></span>
+        <span>L <i class="${cls(ch)}">${fmtPx(bar.low, d, loc)}</i></span><span>C <i class="${cls(ch)}">${fmtPx(bar.close, d, loc)}</i></span>
         <span class="${cls(ch)}">${signed(ch, d)} (${signed(chp)}%)</span>
         ${bar.volume ? `<span class="muted">Vol ${fmtVol(bar.volume, this.meta.currency)}</span>` : ""}
       </div>

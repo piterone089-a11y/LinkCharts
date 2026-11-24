@@ -10,8 +10,9 @@ export async function openSettings() {
   const render = (data) => {
     const markets = (p) => p.markets.map((k) => esc(data.markets[k].split(" (")[0])).join(", ");
     const optionalOnly = (p) => p.fields.length && p.fields.every((f) => f.optional);
+    const keysSaved = (p) => p.fields.some((f) => f.value);
     const status = (p) => p.builtIn ? `<span class="pill ok">Always on</span>`
-      : optionalOnly(p) ? `<span class="pill ok">Ready · key optional</span>`
+      : optionalOnly(p) ? `<span class="pill ok">${keysSaved(p) ? "Ready · keys saved" : "Ready · key optional"}</span>`
       : p.configured ? `<span class="pill ok">Connected</span>`
       : p.login?.keysSaved ? `<span class="pill warn">Log in needed</span>` : `<span class="pill">Not set</span>`;
     const card = (p) => p.builtIn
@@ -29,7 +30,7 @@ export async function openSettings() {
             <div class="muted">In your Kite app's settings, the <b>Redirect URL</b> must be <code class="copyable" title="Click to copy">${esc(p.login.redirect)}</code></div>
           </div>` : ""}
           <div class="row-end"><span class="test-result small"></span>
-            ${p.configured || p.login?.keysSaved ? `${optionalOnly(p) ? "" : `<button type="button" data-act="remove" class="danger">Remove</button>`}` : ""}
+            ${(p.configured || p.login?.keysSaved) && (!optionalOnly(p) || keysSaved(p)) ? `<button type="button" data-act="remove" class="danger">Remove</button>` : ""}
             ${p.configured ? `<button type="button" data-act="test">Test</button>` : ""}
             <button type="submit" class="primary">Save</button></div>
         </form>`;

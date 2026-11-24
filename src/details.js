@@ -1,5 +1,5 @@
 // Symbol details panel (right sidebar, below the watchlist): price, stats, 52-week range, performance.
-import { api, esc, short, fmtPx, fmtVol, signed, cls, precisionFor, fmtTime, currencySymbol } from "./util.js";
+import { api, esc, short, fmtPx, fmtVol, signed, cls, precisionFor, fmtTime, currencySymbol, localeFor } from "./util.js";
 
 const PERIODS = [["1W", 7], ["1M", 30], ["3M", 91], ["6M", 182], ["YTD", "ytd"], ["1Y", 365]];
 
@@ -43,7 +43,7 @@ export class Details {
   render() {
     const m = this.meta;
     if (!m) return;
-    const d = precisionFor(m.price, m.symbol);
+    const d = precisionFor(m.price, m.symbol), loc = localeFor(m.currency);
     const ch = m.prevClose ? m.price - m.prevClose : 0, chp = m.prevClose ? (ch / m.prevClose) * 100 : 0;
     const pos = m.high52 > m.low52 ? ((m.price - m.low52) / (m.high52 - m.low52)) * 100 : 50;
     const dayPos = m.dayHigh > m.dayLow ? ((m.price - m.dayLow) / (m.dayHigh - m.dayLow)) * 100 : 50;
@@ -53,16 +53,16 @@ export class Details {
         <div><div class="dt-sym">${esc(short(m.symbol))}</div><div class="muted small">${esc(m.name || "")}</div>
         <div class="muted small">${esc(m.exchange || "")} · ${esc(m.type === "INDEX" ? "Index" : m.type || "")} · ${esc(m.currency || "")}</div></div>
       </div>
-      <div class="dt-price">${currencySymbol(m.currency)}${fmtPx(m.price, d)}</div>
+      <div class="dt-price">${currencySymbol(m.currency)}${fmtPx(m.price, d, loc)}</div>
       <div class="${cls(ch)}">${signed(ch, d)} (${signed(chp)}%)</div>
       <div class="muted small"><i class="mk ${m.marketOpen ? "open" : ""}"></i> ${status}${m.marketTime ? " · last " + fmtTime(m.marketTime, m.timezone) : ""}</div>
       <div class="dt-trade"><button class="sell" data-t="sell">Sell</button><button class="buy" data-t="buy">Buy</button></div>
       <div class="dt-range"><div class="muted small">Day's range</div><div class="bar"><i style="left:${clamp(dayPos)}%"></i></div>
-        <div class="ends"><span>${fmtPx(m.dayLow, d)}</span><span>${fmtPx(m.dayHigh, d)}</span></div></div>
+        <div class="ends"><span>${fmtPx(m.dayLow, d, loc)}</span><span>${fmtPx(m.dayHigh, d, loc)}</span></div></div>
       <div class="dt-range"><div class="muted small">52-week range</div><div class="bar"><i style="left:${clamp(pos)}%"></i></div>
-        <div class="ends"><span>${fmtPx(m.low52, d)}</span><span>${fmtPx(m.high52, d)}</span></div></div>
+        <div class="ends"><span>${fmtPx(m.low52, d, loc)}</span><span>${fmtPx(m.high52, d, loc)}</span></div></div>
       <div class="stats">
-        <span>Prev close</span><span>${fmtPx(m.prevClose, d)}</span>
+        <span>Prev close</span><span>${fmtPx(m.prevClose, d, loc)}</span>
         <span>Volume</span><span>${fmtVol(m.volume, m.currency)}</span>
       </div>
       ${this.perf ? `<div class="muted small dt-h">Performance</div><div class="perf">${this.perf.map(([l, v]) => `<div class="${cls(v)}"><b>${v == null ? "—" : signed(v) + "%"}</b><span>${l}</span></div>`).join("")}</div>` : ""}

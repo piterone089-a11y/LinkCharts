@@ -13,6 +13,7 @@ const SECONDS = { "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "1d
 
 export function marketOf(symbol) {
   if (/\.(NS|BO)$/.test(symbol) || /^\^(NSE|BSE|CNX|NIFTY)/.test(symbol) || symbol === "^BSESN") return "india";
+  if (/^[A-Z0-9]{2,12}-[A-Z]{2,5}-(SWAP|\d{6})$/.test(symbol)) return "crypto"; // perp / dated future
   if (/^[A-Z0-9]{2,12}-(USD|USDT|EUR|INR|GBP|BTC|ETH)$/.test(symbol)) return "crypto";
   if (/=X$/.test(symbol)) return "forex";
   if (/=F$/.test(symbol)) return "futures";
@@ -220,7 +221,7 @@ export const polygon = {
 
 // Order here is the order shown in Settings: free built-ins first, then Indian brokers, then global APIs.
 export const PROVIDERS = {
-  yahoo, binance, ...pick(EXTRA_PROVIDERS, "coinbase", "kraken", "upstox", "coingecko"),
+  yahoo, binance, ...pick(EXTRA_PROVIDERS, "coinbase", "kraken", "okx", "upstox", "coingecko"),
   fyers, ...pick(EXTRA_PROVIDERS, "kite"),
   twelvedata, polygon, ...pick(EXTRA_PROVIDERS, "alpaca", "tiingo", "fmp", "eodhd", "marketstack", "alphavantage", "tradier"),
 };

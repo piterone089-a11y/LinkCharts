@@ -91,11 +91,12 @@ const AUTO_ORDER = {
   india: ["kite", "fyers", "eodhd", "twelvedata", "yahoo", "upstox"],
   us: ["alpaca", "polygon", "tiingo", "twelvedata", "fmp", "eodhd", "tradier", "marketstack", "alphavantage", "yahoo"],
   global: ["eodhd", "twelvedata", "fmp", "marketstack", "alphavantage", "yahoo"],
-  crypto: ["binance", "coinbase", "alpaca", "tiingo", "twelvedata", "polygon", "kraken", "yahoo", "coingecko"],
+  crypto: ["binance", "okx", "coinbase", "alpaca", "tiingo", "twelvedata", "polygon", "kraken", "yahoo", "coingecko"],
   forex: ["twelvedata", "polygon", "tiingo", "fmp", "eodhd", "alphavantage", "yahoo"],
   futures: ["yahoo"],
 };
 // A key-less provider (like CoinGecko without its optional key) only joins "auto" when the user saved settings for it.
+// Providers that are the only source for something (OKX covers perpetual swaps) set alwaysOn so they always take part.
 const keyOptional = (id) => PROVIDERS[id].fields?.length && PROVIDERS[id].fields.every((f) => f.optional);
 
 function candidateSources(symbol, interval) {
@@ -106,7 +107,7 @@ function candidateSources(symbol, interval) {
   return [...new Set(order)].filter((id) => {
     const p = PROVIDERS[id];
     if (!p || !isConfigured(id) || !p.markets.includes(market) || (p.supports && !p.supports(symbol, interval))) return false;
-    return explicit || !keyOptional(id) || !!config.providers[id];
+    return explicit || !keyOptional(id) || !!config.providers[id] || !!p.alwaysOn;
   });
 }
 
@@ -124,42 +125,62 @@ async function cached(key, ttlMs, fn) {
 
 // Yahoo's chartPreviousClose is the close before the *requested range*; derive the real previous session close.
 const dayKey = (unix, off) => new Date((unix + off) * 1000).toISOString().slice(0, 10);
+
+/** A meta block built from candles, for symbols Yahoo doesn't list (e.g. OKX perpetual swaps). */
+function metaFromCandles(symbol, candles) {
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2]?.close ?? last.open;
+  return {
+    symbol, name: symbol, exchange: "", currency: "", gmtoffset: 0,
+    price: last.close, prevClose: prev, volume: last.volume, market: marketOf(symbol), marketOpen: true,
+    spark: candles.slice(-5).map((c) => c.close),
+  };
+}
+
 async function snapshot(symbol) {
   return cached(`snap:${symbol}`, 15_000, async () => {
-    const daily = await yahoo.raw(symbol, "1d", "5d");
-    const c = daily.candles, m = daily.meta;
-    const lastIsToday = c.length && m.marketTime && dayKey(c[c.length - 1].time, m.gmtoffset) === dayKey(m.marketTime, m.gmtoffset);
-    m.prevClose = (lastIsToday ? c[c.length - 2] : c[c.length - 1])?.close ?? m.prevClose;
-    m.market = marketOf(symbol);
-    const now = Date.now() / 1000;
-    m.marketOpen = m.market === "crypto" ? true : !!(m.session && now >= m.session.start && now < m.session.end);
-    m.spark = c.slice(-5).map((x) => x.close);
-    return m;
+    try {
+      const daily = await yahoo.raw(symbol, "1d", "5d");
+      const c = daily.candles, m = daily.meta;
+      const lastIsToday = c.length && m.marketTime && dayKey(c[c.length - 1].time, m.gmtoffset) === dayKey(m.marketTime, m.gmtoffset);
+      m.prevClose = (lastIsToday ? c[c.length - 2] : c[c.length - 1])?.close ?? m.prevClose;
+      m.market = marketOf(symbol);
+      const now = Date.now() / 1000;
+      m.marketOpen = m.market === "crypto" ? true : !!(m.session && now >= m.session.start && now < m.session.end);
+      m.spark = c.slice(-5).map((x) => x.close);
+      return m;
+    } catch (err) {
+      // Crypto derivatives (BTC-USDT-SWAP, BTC-USD-261127) have no Yahoo listing: quote them from a provider.
+      if (marketOf(symbol) !== "crypto") throw err;
+      const { candles } = await loadCandles(symbol, "1d");
+      return metaFromCandles(symbol, candles);
+    }
   });
 }
 
 // ---------------- API ----------------
 
-async function chart(symbol, interval) {
-  const sources = candidateSources(symbol, interval);
+/** First source in this market's order that has candles for the symbol. */
+async function loadCandles(symbol, interval) {
   const errors = [];
-  let candles = null, used = null;
-  for (const id of sources) {
+  for (const id of candidateSources(symbol, interval)) {
     try {
       const ttl = interval.endsWith("m") ? 8_000 : 60_000;
-      candles = await cached(`c:${id}:${symbol}:${interval}`, ttl, () => PROVIDERS[id].candles(symbol, interval, config.providers[id] || {}));
+      const candles = await cached(`c:${id}:${symbol}:${interval}`, ttl, () => PROVIDERS[id].candles(symbol, interval, config.providers[id] || {}));
       if (!candles.length) throw new ProviderError("returned no candles", 404);
-      used = PROVIDERS[id];
-      break;
+      return { candles, used: PROVIDERS[id], errors };
     } catch (err) {
       errors.push(`${PROVIDERS[id].name}: ${err.message}`);
     }
   }
-  if (!used) throw new ProviderError(errors.join(" · ") || "No data source supports this symbol", 404);
+  throw new ProviderError(errors.join(" · ") || "No data source supports this symbol", 404);
+}
+
+async function chart(symbol, interval) {
+  const { candles, used, errors } = await loadCandles(symbol, interval);
   let meta;
   try { meta = await snapshot(symbol); } catch {
-    const last = candles[candles.length - 1];
-    meta = { symbol, name: symbol, exchange: "", currency: "", gmtoffset: 0, price: last.close, prevClose: candles[candles.length - 2]?.close, market: marketOf(symbol), marketOpen: false };
+    meta = metaFromCandles(symbol, candles);
   }
   return {
     meta, candles,
