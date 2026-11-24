@@ -7,7 +7,12 @@ const net = require("net");
 const { pathToFileURL } = require("url");
 const { setupUpdates } = require("./updater.cjs");
 
-setupUpdates({ repo: "Mehal45/LinkCharts", assets: { win32: /^LinkCharts-Setup-.*\.exe$/i } });
+setupUpdates({
+  repo: "Mehal45/LinkCharts",
+  assets: { win32: /^LinkCharts-Setup-.*\.exe$/i },
+  // Only the page this app serves may download or run an installer.
+  isTrustedUrl: (u) => !!url && u.startsWith(url),
+});
 
 const root = path.join(__dirname, "..");
 let win = null;
@@ -47,6 +52,11 @@ function createWindow() {
     webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, "preload.cjs") },
   });
   win.once("ready-to-show", () => win.show());
+  // The page only needs notifications and the clipboard; refuse everything else (camera, mic, geolocation…).
+  win.webContents.session.setPermissionRequestHandler((wc, permission, callback) => {
+    const local = !!url && wc.getURL().startsWith(url);
+    callback(local && ["notifications", "clipboard-read", "clipboard-sanitized-write"].includes(permission));
+  });
   win.webContents.on("before-input-event", (e, input) => {
     if (input.type !== "keyDown") return;
     if (input.key === "F12" || (input.control && input.shift && input.key.toLowerCase() === "i")) win.webContents.toggleDevTools();

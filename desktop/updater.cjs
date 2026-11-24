@@ -4,9 +4,20 @@
 // isn't signed by Apple can't replace itself, so there the new download just opens in the browser.
 const { app, ipcMain, shell, net } = require("electron");
 const fs = require("node:fs");
-const os = require("node:os");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+
+/** The installer may only be fetched from GitHub's own hosts. */
+const TRUSTED_DOWNLOAD_HOSTS = /(^|\.)(github\.com|githubusercontent\.com)$/i;
+
+/** SHA-256 of a file, streamed so a 100 MB installer isn't read into memory. */
+function sha256(file) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    fs.createReadStream(file).on("data", (c) => hash.update(c)).on("end", () => resolve(hash.digest("hex"))).on("error", reject);
+  });
+}
 
 /** True when version a ("1.23.0") is newer than b. */
 function newer(a, b) {
@@ -17,12 +28,19 @@ function newer(a, b) {
 
 /**
  * repo: "Owner/Name" on GitHub. assets: { win32: /Setup-.*\.exe$/, darwin: /\.dmg$/ } — which release file
- * is this computer's installer.
+ * is this computer's installer. isTrustedUrl(url) says whether a request comes from the app's own page.
  */
-function setupUpdates({ repo, assets }) {
-  let latest = null; // { version, notes, page, asset: { name, url, size } | null }
+function setupUpdates({ repo, assets, isTrustedUrl }) {
+  let latest = null; // { version, notes, page, asset: { name, url, size, digest } | null }
   let file = null; // the downloaded installer
   let downloading = null;
+
+  /** Only the app's own page may ask for an (unsigned) installer to be downloaded and run. */
+  function assertTrusted(event) {
+    if (typeof isTrustedUrl !== "function") return;
+    const from = event?.senderFrame?.url || "";
+    if (!isTrustedUrl(from)) throw new Error("Blocked: this request did not come from the LinkCharts window.");
+  }
 
   async function check() {
     const r = await net.fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
@@ -35,7 +53,8 @@ function setupUpdates({ repo, assets }) {
       version: String(rel.tag_name || "").replace(/^v/i, ""),
       notes: rel.body || "",
       page: rel.html_url,
-      asset: a ? { name: a.name, url: a.browser_download_url, size: a.size } : null,
+      // digest is GitHub's own SHA-256 for the uploaded file ("sha256:…"); we refuse to run a file without one.
+      asset: a ? { name: a.name, url: a.browser_download_url, size: a.size, digest: a.digest || null } : null,
     };
     return {
       current: app.getVersion(),
@@ -52,13 +71,22 @@ function setupUpdates({ repo, assets }) {
     if (!latest?.asset) await check();
     const a = latest.asset;
     if (!a) throw new Error("This release has no installer for this computer.");
-    const dest = path.join(os.tmpdir(), `${app.getName()} update`, a.name);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    if (fs.existsSync(dest) && fs.statSync(dest).size === a.size) return (file = dest); // downloaded before
+    if (!a.digest) throw new Error("This release doesn't publish a checksum, so LinkCharts won't install it automatically. Download it from the release page.");
+    const expected = String(a.digest).replace(/^sha256:/i, "").toLowerCase();
+    // The user's own app-data folder, not the shared temp folder anyone on this machine can write to.
+    const dest = path.join(app.getPath("userData"), "updates", path.basename(a.name));
+    fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+    if (fs.existsSync(dest)) {
+      const same = fs.statSync(dest).size === a.size && (await sha256(dest)) === expected;
+      if (same) return (file = dest); // downloaded and verified before
+      fs.rmSync(dest, { force: true }); // partial or tampered: fetch it again
+    }
+    const host = (() => { try { return new URL(a.url); } catch { return null; } })();
+    if (!host || host.protocol !== "https:" || !TRUSTED_DOWNLOAD_HOSTS.test(host.hostname)) throw new Error("The download link is not from GitHub — not downloading it.");
     const r = await net.fetch(a.url);
     if (!r.ok || !r.body) throw new Error(`The download failed (${r.status}).`);
     const part = dest + ".part";
-    const out = fs.createWriteStream(part);
+    const out = fs.createWriteStream(part, { mode: 0o600 });
     let got = 0, told = 0;
     try {
       const reader = r.body.getReader();
@@ -73,15 +101,24 @@ function setupUpdates({ repo, assets }) {
       await new Promise((res) => out.end(res));
     }
     if (a.size && got !== a.size) throw new Error("The download was interrupted — try again.");
+    // Never run a file that isn't exactly the one GitHub published.
+    if ((await sha256(part)) !== expected) {
+      fs.rmSync(part, { force: true });
+      throw new Error("The downloaded installer doesn't match GitHub's checksum — not installing it.");
+    }
     fs.renameSync(part, dest);
     return (file = dest);
   }
 
-  ipcMain.handle("updates:check", () => check());
-  ipcMain.handle("updates:download", (e) => (downloading ||= download(e.sender).finally(() => { downloading = null; })).then(() => true));
-  ipcMain.handle("updates:install", () => {
+  /** Only ever hand an https GitHub link to the browser, never a scheme an attacker could pick. */
+  const openGithub = (u) => shell.openExternal(typeof u === "string" && /^https:\/\/(www\.)?github\.com\//i.test(u) ? u : `https://github.com/${repo}/releases/latest`);
+
+  ipcMain.handle("updates:check", (e) => { assertTrusted(e); return check(); });
+  ipcMain.handle("updates:download", (e) => { assertTrusted(e); return (downloading ||= download(e.sender).finally(() => { downloading = null; })).then(() => true); });
+  ipcMain.handle("updates:install", (e) => {
+    assertTrusted(e);
     if (process.platform !== "win32" || !app.isPackaged) {
-      shell.openExternal(latest?.asset?.url || latest?.page || `https://github.com/${repo}/releases/latest`);
+      openGithub(latest?.asset?.url || latest?.page);
       return false;
     }
     if (!file) throw new Error("Download the update first.");
@@ -95,7 +132,10 @@ function setupUpdates({ repo, assets }) {
     setTimeout(() => app.quit(), 100);
     return true;
   });
-  ipcMain.handle("updates:open-page", () => shell.openExternal(latest?.page || `https://github.com/${repo}/releases/latest`));
+  ipcMain.handle("updates:open-page", (e) => {
+    assertTrusted(e);
+    return openGithub(latest?.page);
+  });
 }
 
 module.exports = { setupUpdates, newer };

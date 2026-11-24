@@ -26,13 +26,43 @@ function readUserData() {
   try { return JSON.parse(fs.readFileSync(userDataPath, "utf8")); } catch { return { savedAt: 0, items: {} }; }
 }
 function writeUserData(data) {
-  fs.mkdirSync(path.dirname(userDataPath), { recursive: true });
+  fs.mkdirSync(path.dirname(userDataPath), { recursive: true, mode: 0o700 });
   const tmp = userDataPath + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
   fs.renameSync(tmp, userDataPath); // atomic: a crash mid-write never leaves a half-written file
+}
+
+/** Files here hold API keys and broker tokens: owner-only, whatever the umask says. */
+function privateWrite(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, text, { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch { /* Windows has no POSIX modes */ }
 }
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
 const SYMBOL_RE = /^[\^A-Z0-9&.\-=]{1,30}$/i;
+
+// ---------------- request guards ----------------
+// The server is local-only, but any web page you open can still reach 127.0.0.1: check who is asking.
+// (A site that rebinds its own domain to 127.0.0.1 would otherwise be "same origin" and could read the API.)
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, "127.0.0.1", "localhost", "[::1]"]);
+const LOCAL_ORIGIN_RE = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
+/** Provider logins we started (GET /api/:provider/login) and are waiting for the broker to answer. */
+const loginStarted = new Map();
+/** Response headers for everything we serve: no sniffing, no referrer leak, no framing. */
+const BASE_HEADERS = { "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store" };
+/** What the page may load: itself, the chart library and the fonts it uses. Nothing else runs. */
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' https://unpkg.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self' wss://data-stream.binance.vision", // live crypto candles
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
 
 // ---------------- config (API keys + routing) ----------------
 
@@ -40,8 +70,7 @@ function loadConfig() {
   try { return JSON.parse(fs.readFileSync(configPath, "utf8")); } catch { return { providers: {}, routing: {} }; }
 }
 function saveConfig(cfg) {
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+  privateWrite(configPath, JSON.stringify(cfg, null, 2));
 }
 let config = loadConfig();
 config.providers ??= {};
@@ -160,6 +189,9 @@ function providersView() {
 }
 
 async function readBody(req, maxChars = 20_000) {
+  // JSON only: a browser can't send this cross-site without a CORS preflight, which this server never grants.
+  const ct = String(req.headers["content-type"] || "").toLowerCase();
+  if (!ct.startsWith("application/json")) throw new ProviderError("Send JSON (Content-Type: application/json)", 415);
   let s = "";
   for await (const chunk of req) { s += chunk; if (s.length > maxChars) throw new ProviderError("Body too large", 413); }
   return s ? JSON.parse(s) : {};
@@ -218,6 +250,7 @@ async function handleApi(req, url) {
   if (lm && PROVIDERS[lm[1]]?.login) {
     const prov = PROVIDERS[lm[1]], c = config.providers[prov.id];
     if (!prov.fields.every((f) => f.optional || c?.[f.key])) throw new ProviderError("Save the API key and secret first", 400);
+    loginStarted.set(prov.id, Date.now()); // the callback is only accepted right after this
     return { url: prov.login.url(c) };
   }
   const pm = /^\/api\/providers\/([a-z]+)(\/test)?$/.exec(p);
@@ -258,12 +291,17 @@ async function handleApi(req, url) {
 
 /** Where the broker sends you after logging in: saves today's token and says so in the browser tab. */
 async function brokerCallback(prov, url, res) {
-  const page = (title, msg) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(`<!doctype html><meta charset="utf-8"><title>LinkCharts</title>
+  const page = (title, msg, status = 200) => res.writeHead(status, { ...BASE_HEADERS, "Content-Type": "text/html; charset=utf-8" }).end(`<!doctype html><meta charset="utf-8"><title>LinkCharts</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <body style="font:16px system-ui;background:#0f1115;color:#e6e8eb;display:grid;place-items:center;height:90vh;margin:0"><div style="text-align:center">
 <h2>${title}</h2><p style="color:#8a919c">${msg}</p></div></body>`);
   const esc = (s) => String(s).replace(/[<>&"]/g, (ch) => `&#${ch.charCodeAt(0)};`);
   const token = url.searchParams.get("request_token");
   if (url.searchParams.get("status") !== "success" || !token) return page("Login cancelled", "Go back to LinkCharts and click Log in again.");
+  // Only accept a callback for a login this app just started: a link someone else sends you can't swap your broker session.
+  const started = loginStarted.get(prov.id) || 0;
+  if (Date.now() - started > 15 * 60_000) return page("Start the login from LinkCharts", "Open LinkCharts, click <b>Log in</b>, and finish in the browser tab it opens.", 403);
+  loginStarted.delete(prov.id);
   try {
     const c = config.providers[prov.id] || {};
     config.providers[prov.id] = { ...c, ...(await prov.session(c, token)) };
@@ -275,9 +313,17 @@ async function brokerCallback(prov, url, res) {
   }
 }
 
-http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://localhost");
+async function serve(req, res) {
+  let url;
+  try { url = new URL(req.url, "http://localhost"); } catch { return res.writeHead(400, BASE_HEADERS).end("Bad request"); }
   const cb = /^\/api\/([a-z]+)\/callback$/.exec(url.pathname);
+  // The broker sends your browser here from its own site, so this one route must accept cross-site visits.
+  const host = String(req.headers.host || "").toLowerCase();
+  const origin = String(req.headers.origin || "");
+  const site = String(req.headers["sec-fetch-site"] || "");
+  if (!ALLOWED_HOSTS.has(host) || (origin && !LOCAL_ORIGIN_RE.test(origin)) || (site === "cross-site" && !cb)) {
+    return res.writeHead(403, { ...BASE_HEADERS, "Content-Type": "text/plain; charset=utf-8" }).end("Cross-origin requests are not allowed. Open LinkCharts itself (http://127.0.0.1:" + port + "/).");
+  }
   if (cb && PROVIDERS[cb[1]]?.login) return brokerCallback(PROVIDERS[cb[1]], url, res);
   if (url.pathname.startsWith("/api/")) {
     try {
@@ -289,14 +335,30 @@ http.createServer(async (req, res) => {
     }
     return;
   }
-  if (url.pathname.startsWith("/data/")) { res.writeHead(404).end("not found"); return; } // never serve stored keys
-  const file = path.join(root, url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname));
-  if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-    res.writeHead(404).end("not found");
-    return;
-  }
-  res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream", "Cache-Control": "no-store" });
+  // Static files. Decode first, then resolve, so /%64ata/config.json can't dodge the /data/ check.
+  let pathname;
+  try { pathname = decodeURIComponent(url.pathname); } catch { return res.writeHead(400, BASE_HEADERS).end("Bad request"); }
+  if (pathname.includes("\0") || pathname === "/data" || pathname.startsWith("/data/")) { res.writeHead(404, BASE_HEADERS).end("not found"); return; } // never serve stored keys
+  const file = path.resolve(root, "." + (pathname === "/" ? "/index.html" : pathname));
+  const rel = path.relative(root, file);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) { res.writeHead(404, BASE_HEADERS).end("not found"); return; }
+  let stat;
+  try { stat = fs.statSync(file); } catch { stat = null; }
+  if (!stat || stat.isDirectory()) { res.writeHead(404, BASE_HEADERS).end("not found"); return; }
+  const ext = path.extname(file);
+  res.writeHead(200, {
+    ...BASE_HEADERS,
+    "Content-Type": types[ext] || "application/octet-stream",
+    ...(ext === ".html" ? { "Content-Security-Policy": CSP } : {}),
+  });
   fs.createReadStream(file).pipe(res);
+}
+
+http.createServer((req, res) => {
+  serve(req, res).catch((e) => {
+    // A broken request must never take the app down with it.
+    try { if (!res.headersSent) res.writeHead(500, { ...BASE_HEADERS, "Content-Type": "application/json" }).end(JSON.stringify({ error: e.message })); else res.destroy(); } catch { /* already gone */ }
+  });
 }).on("error", (e) => {
   if (e.code !== "EADDRINUSE") throw e;
   // Probably LinkCharts is already running (e.g. started twice): just open it.
