@@ -4,3 +4,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 dist/
+
+# Local working notes (agent planning files, browser-test output) stay on this machine.
+.planning/
+.playwright-mcp/
